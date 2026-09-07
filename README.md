@@ -79,3 +79,4 @@ python sync_json_to_excel.py
 * `read_invoice_content(filename, page_number=1)`: Reads text from Word/Excel/digital PDFs, or returns optimized visual image content for scanned pages/photos.
 * `save_extracted_data_to_json(...)`: Stores extracted metadata (`invoice no.(Ai)`, `invoice date(AI)`, `AMOUNT(AI)`, `GST NUMBER`, `PAN NUMBER`, page information) and safely unlinks the source file when finished.
 * `get_extracted_invoices()`: Retrieves all stored JSON records.
+"# Invoice-automation" 
