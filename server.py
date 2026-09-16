@@ -26,7 +26,7 @@ mcp = MCPServer("Invoice Processing Server")
 BASE_DIR = Path(__file__).resolve().parent
 INVOICES_DIR = BASE_DIR / "invoices"
 INBOX_DIR = INVOICES_DIR / "inbox"
-PROCESSED_DIR = INVOICES_DIR / "processed"  # Retained for compatibility; not used.
+PROCESSED_DIR = INVOICES_DIR / "processed"  # Successfully extracted files are moved here, never deleted.
 FAILED_DIR = INVOICES_DIR / "failed"
 EXTRACTED_DATA_PATH = BASE_DIR / "extracted_invoices.json"
 RENAME_MAP_PATH = INVOICES_DIR / ".filename_renames.json"
@@ -143,7 +143,7 @@ def save_json_payload(payload: dict) -> None:
 def list_inbox_invoices() -> list[str]:
     """List invoice PDFs, Word documents (.docx), Excel spreadsheets (.xlsx), and images waiting in the inbox."""
     sanitize_inbox_filenames()
-    supported = {".pdf", ".png", ".jpg", ".jpeg", ".docx", ".doc", ".xlsx", ".xls"}
+    supported = {".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".docx", ".doc", ".xlsx", ".xls"}
     return sorted(
         path.name for path in INBOX_DIR.iterdir()
         if path.is_file()
@@ -769,7 +769,7 @@ def save_extracted_data_to_json(
     page_number: int = 1,
     total_pages: int = 1,
 ) -> dict:
-    """Save Claude's extraction to JSON, then delete the source inbox file when all pages are done.
+    """Save Claude's extraction to JSON, then move the source inbox file to processed/ (never deleted) when all pages are done.
 
     IMPORTANT FOR CLAUDE AI:
     Analyze the invoice document (line items, description, header, SAC codes, tax tables) to extract:
@@ -934,13 +934,22 @@ def save_extracted_data_to_json(
         payload["invoices"] = list(records.values())
         save_json_payload(payload)
 
-        # Only delete source file if we have reached the last page (or single-page document)
-        source_deleted = False
+        # Only move the source file out of inbox once we've reached the last page
+        # (or single-page document). It's moved to processed/, never deleted, so the
+        # original scan/photo stays available for reference.
+        source_moved = False
         if page_number >= total_pages:
-            file_path.unlink()
-            source_deleted = True
-            record["file_deleted"] = True
-            record["deleted_at"] = datetime.now(timezone.utc).isoformat()
+            PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+            target_path = PROCESSED_DIR / file_path.name
+            counter = 1
+            while target_path.exists():
+                target_path = PROCESSED_DIR / f"{file_path.stem} ({counter}){file_path.suffix}"
+                counter += 1
+            shutil.move(str(file_path), str(target_path))
+            source_moved = True
+            record["file_moved_to_processed"] = True
+            record["processed_path"] = str(target_path)
+            record["processed_at"] = datetime.now(timezone.utc).isoformat()
             payload["generated_at"] = datetime.now(timezone.utc).isoformat()
             save_json_payload(payload)
 
@@ -949,10 +958,10 @@ def save_extracted_data_to_json(
             "json_file": str(EXTRACTED_DATA_PATH),
             "page_number": page_number,
             "total_pages": total_pages,
-            "source_file_deleted": source_deleted,
+            "source_file_moved_to_processed": source_moved,
             "message": (
                 f"Saved invoice for {filename} (page {page_number}/{total_pages}). "
-                + ("Source file deleted." if source_deleted else "More pages remain in this PDF.")
+                + ("Source file moved to processed/." if source_moved else "More pages remain in this PDF.")
             ),
         }
     except Exception as error:
