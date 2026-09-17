@@ -40,15 +40,16 @@ Call `read_invoice_content(filename=..., page_number=1)`.
 2. `invoice_date_ai`: Invoice date formatted as **`M/D/YYYY`** without leading zeros (e.g. `9/1/2026`, `9/2/2026`, `8/1/2026`).
    - For example: `01/09/2026` ➔ `9/1/2026`, `02-09-2026` ➔ `9/2/2026`, `01-08-2026` or `1-Aug-26` ➔ `8/1/2026`.
 3. `vendor_name`: **Vendor / Seller / Landlord Name extracted directly from the invoice document** (letterhead, header, Seller/Landlord details). Do NOT take from Sheet1.
-4. `amount_ai`: **TOTAL TAXABLE VALUE (Base Amount before GST / taxes)** as a float.
+4. `amount_ai`: **TOTAL TAXABLE VALUE (Base Amount before GST / taxes)** as a float rounded to the nearest whole integer.
    > [!IMPORTANT]
    > You MUST extract the **Total Taxable Value** (the base amount before taxes), NOT the Grand Total.
    > - Look on the invoice table or summary for: **"Total Taxable Value"**, **"Taxable Amount"**, **"Taxable Value"**, **"Subtotal"**, **"Basic Amount"**, or **"Amount before Tax"**.
+   > - **Round Off Rule**: Round the taxable value to the nearest whole integer (e.g. `221197.88` ➔ `221198.00`, `23.4` ➔ `23.00`, `23.5` ➔ `24.00`).
    > - **Example**:
-   >   * Taxable Value: ₹1,834,250.00
+   >   * Taxable Value: ₹1,834,250.30
    >   * CGST + SGST (18%): ₹330,164.00
    >   * Total Invoice Value / Grand Total: ₹2,164,414.00
-   >   ➔ You MUST pass **`amount_ai: 1834250.0`** (the Taxable Value), NOT the Grand Total.
+   >   ➔ You MUST pass **`amount_ai: 1834250.0`** (the rounded Taxable Value), NOT the Grand Total.
    > - For unregistered vendors (URD) where no tax is charged, the total amount is the taxable value.
 5. `gst_number`: 15-character GSTIN (if present).
 6. `pan_number`: 10-character PAN (characters 3-12 of GSTIN if not explicitly shown).

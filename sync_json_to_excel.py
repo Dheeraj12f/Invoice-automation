@@ -9,6 +9,7 @@ import shutil
 import time
 from collections import defaultdict
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -25,13 +26,14 @@ POLL_SECONDS = 2
 SHEET1_HEADER_ROW = 2
 
 HEADERS = [
-    "NAME", "REF_ADMSITE_SHRTNAME", "TDS_NAME", "REF_NO", "REF_DT",
+    "SUPPLIER_SLID", "NAME", "REF_ADMSITE_SHRTNAME", "TDS_NAME", "REF_NO", "REF_DT",
     "SERVICE_NAME", "AMOUNT", "AMOUNT(SHEET1)", "TAG_ADMSITE_SHRTNAME", "TAG_ADMSITE_AMOUNT",
     "TDS", "GST", "Paybale", "TERM", "FORM_NAME",
     "Remark", "GST NO.", "PAN NUMBER",
 ]
 
 COL_INDEX = {name: idx for idx, name in enumerate(HEADERS)}
+IDX_SUPPLIER_SLID = COL_INDEX["SUPPLIER_SLID"]
 IDX_NAME = COL_INDEX["NAME"]
 IDX_REF_ADMSITE_SHRTNAME = COL_INDEX["REF_ADMSITE_SHRTNAME"]
 IDX_TDS_NAME = COL_INDEX["TDS_NAME"]
@@ -226,6 +228,18 @@ STATE_NAME_TOKENS = {
     "up": "Uttar Pradesh", "mp": "Madhya Pradesh", "ap": "Andhra Pradesh", "tn": "Tamil Nadu",
     "wb": "West Bengal", "hp": "Himachal Pradesh", "j&k": "Jammu and Kashmir",
 }
+
+
+def round_amount(val: float | int | str | None) -> float | None:
+    """Round off amount to nearest integer (e.g. 221197.88 -> 221198.00, 23.4 -> 23.00)."""
+    if val is None or val == "":
+        return None
+    try:
+        num = float(str(val).replace(",", "").replace("₹", "").strip())
+        d = Decimal(str(num)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return float(d)
+    except Exception:
+        return val
 
 
 def estimate_tds_gst_paybale(amount: float | int | None, tds_name: str) -> tuple[float, float, float]:
@@ -778,6 +792,11 @@ def reconcile_existing_invoices(sheet, gst_lookup: dict, pan_lookup: dict, name_
             # them blank, and note in Remark that no Sheet1 match exists.
             for row_idx, vals in row_items:
                 changed = False
+                if vals[IDX_AMOUNT] not in (None, ""):
+                    rnd_amt = round_amount(vals[IDX_AMOUNT])
+                    if rnd_amt is not None and rnd_amt != vals[IDX_AMOUNT]:
+                        vals[IDX_AMOUNT] = rnd_amt
+                        changed = True
                 new_ref_site = derive_admsite_shrtname(str(vals[IDX_GST_NO] or ""))
                 if new_ref_site and vals[IDX_REF_ADMSITE_SHRTNAME] != new_ref_site:
                     vals[IDX_REF_ADMSITE_SHRTNAME] = new_ref_site
@@ -831,6 +850,18 @@ def reconcile_existing_invoices(sheet, gst_lookup: dict, pan_lookup: dict, name_
                     used_candidates.append(matched_cand)
 
                 changed = False
+
+                if vals[IDX_AMOUNT] not in (None, ""):
+                    rnd_amt = round_amount(vals[IDX_AMOUNT])
+                    if rnd_amt is not None and rnd_amt != vals[IDX_AMOUNT]:
+                        vals[IDX_AMOUNT] = rnd_amt
+                        changed = True
+
+                # Populate / synchronize SUPPLIER_SLID
+                new_slid = str(matched_cand.get("supplier_slid") or "").strip()
+                if new_slid and str(vals[IDX_SUPPLIER_SLID] or "").strip() != new_slid:
+                    vals[IDX_SUPPLIER_SLID] = new_slid
+                    changed = True
 
                 # Populate / synchronize AMOUNT(SHEET1)
                 new_s1_amt = matched_cand.get("amount")
@@ -905,6 +936,19 @@ def reconcile_existing_invoices(sheet, gst_lookup: dict, pan_lookup: dict, name_
             sheet.cell(row=idx, column=IDX_GST + 1).number_format = '"₹"#,##0.00'
             sheet.cell(row=idx, column=IDX_PAYBALE + 1).number_format = '"₹"#,##0.00'
         sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}{1 + len(deduped_rows)}"
+
+    # Reconcile existing duplicate sheet rows to round off AMOUNT
+    if "DUPLICATE DATA" in sheet.parent.sheetnames:
+        dup_s = sheet.parent["DUPLICATE DATA"]
+        for r in range(2, dup_s.max_row + 1):
+            cur_amt = dup_s.cell(row=r, column=IDX_AMOUNT + 1).value
+            if cur_amt not in (None, ""):
+                rnd_amt = round_amount(cur_amt)
+                if rnd_amt is not None and rnd_amt != cur_amt:
+                    dup_s.cell(row=r, column=IDX_AMOUNT + 1, value=rnd_amt)
+                    updated_count += 1
+
+    if updated_count > 0 or removed_duplicates > 0:
         print(f"Reconciled ledger: corrected {updated_count} row(s), removed {removed_duplicates} duplicate row(s).")
 
     return updated_count + removed_duplicates
@@ -965,7 +1009,7 @@ def apply_header_styles(sheet) -> None:
 
         if header_name in ("Remark", "Remarks"):
             sheet.column_dimensions[cell.column_letter].width = 30
-        elif header_name in ("GST NO.", "PAN NUMBER", "NAME", "SERVICE_NAME", "TAG_ADMSITE_SHRTNAME", "AMOUNT(SHEET1)"):
+        elif header_name in ("SUPPLIER_SLID", "GST NO.", "PAN NUMBER", "NAME", "SERVICE_NAME", "TAG_ADMSITE_SHRTNAME", "AMOUNT(SHEET1)"):
             sheet.column_dimensions[cell.column_letter].width = 22
         else:
             sheet.column_dimensions[cell.column_letter].width = 18
@@ -988,15 +1032,19 @@ def migrate_legacy_sheet(sheet, old_headers: list) -> None:
             s1_headers = [str(c.value).strip().lower() for c in s1_sheet[s1_header_row] if c.value]
             s1_name_idx = s1_headers.index("name") if "name" in s1_headers else -1
             s1_gst_idx = s1_headers.index("gst number") if "gst number" in s1_headers else -1
+            s1_slid_idx = s1_headers.index("supplier_slid") if "supplier_slid" in s1_headers else -1
             s1_rem_idx = s1_headers.index("remarks") if "remarks" in s1_headers else -1
             if s1_name_idx >= 0:
                 for s1_row in s1_sheet.iter_rows(min_row=s1_header_row + 1, values_only=True):
                     if s1_name_idx < len(s1_row) and s1_row[s1_name_idx]:
                         nm = str(s1_row[s1_name_idx]).strip().lower()
                         gst_val = str(s1_row[s1_gst_idx]).strip() if (s1_gst_idx >= 0 and s1_gst_idx < len(s1_row) and s1_row[s1_gst_idx]) else ""
+                        slid_val = str(s1_row[s1_slid_idx]).strip() if (s1_slid_idx >= 0 and s1_slid_idx < len(s1_row) and s1_row[s1_slid_idx]) else ""
                         rem_val = str(s1_row[s1_rem_idx]).strip() if (s1_rem_idx >= 0 and s1_rem_idx < len(s1_row) and s1_row[s1_rem_idx]) else ""
                         if nm not in s1_lookup or (gst_val and not s1_lookup[nm].get("gst")):
-                            s1_lookup[nm] = {"gst": gst_val, "remarks": rem_val}
+                            s1_lookup[nm] = {"gst": gst_val, "remarks": rem_val, "slid": slid_val}
+                        elif slid_val and not s1_lookup[nm].get("slid"):
+                            s1_lookup[nm]["slid"] = slid_val
     except Exception:
         pass
 
@@ -1069,7 +1117,9 @@ def migrate_legacy_sheet(sheet, old_headers: list) -> None:
             # If old schema had AMOUNT(AI), prioritize it for AMOUNT
             amt_ai_idx = old_col_map.get("amount(ai)")
             if amt_ai_idx is not None and amt_ai_idx < len(vals) and vals[amt_ai_idx] not in (None, ""):
-                new_vals[IDX_AMOUNT] = vals[amt_ai_idx]
+                new_vals[IDX_AMOUNT] = round_amount(vals[amt_ai_idx])
+            elif new_vals[IDX_AMOUNT] not in (None, ""):
+                new_vals[IDX_AMOUNT] = round_amount(new_vals[IDX_AMOUNT])
 
             # If old schema had AMOUNT(SHEET1), map it
             amt_s1_idx = old_col_map.get("amount(sheet1)")
@@ -1153,8 +1203,14 @@ def migrate_legacy_sheet(sheet, old_headers: list) -> None:
                         invoice_amount=new_vals[IDX_AMOUNT],
                         hint_text=cur_hint,
                     )
-                    if m_cand and m_cand.get("amount") not in (None, ""):
-                        new_vals[IDX_AMOUNT_SHEET1] = m_cand.get("amount")
+                    if m_cand:
+                        if m_cand.get("amount") not in (None, "") and not new_vals[IDX_AMOUNT_SHEET1]:
+                            new_vals[IDX_AMOUNT_SHEET1] = m_cand.get("amount")
+                        if m_cand.get("supplier_slid") and not new_vals[IDX_SUPPLIER_SLID]:
+                            new_vals[IDX_SUPPLIER_SLID] = str(m_cand.get("supplier_slid") or "").strip()
+
+            if not new_vals[IDX_SUPPLIER_SLID] and s1_info.get("slid"):
+                new_vals[IDX_SUPPLIER_SLID] = str(s1_info.get("slid") or "").strip()
 
             missing_ai = get_missing_ai_fields(new_vals)
             if missing_ai:
@@ -1179,6 +1235,9 @@ def migrate_legacy_sheet(sheet, old_headers: list) -> None:
         sheet.cell(row=idx, column=IDX_AMOUNT + 1).number_format = '"₹"#,##0.00'
         sheet.cell(row=idx, column=IDX_AMOUNT_SHEET1 + 1).number_format = '"₹"#,##0.00'
         sheet.cell(row=idx, column=IDX_TAG_ADMSITE_AMOUNT + 1).number_format = '"₹"#,##0.00'
+        sheet.cell(row=idx, column=IDX_TDS + 1).number_format = '"₹"#,##0.00'
+        sheet.cell(row=idx, column=IDX_GST + 1).number_format = '"₹"#,##0.00'
+        sheet.cell(row=idx, column=IDX_PAYBALE + 1).number_format = '"₹"#,##0.00'
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}{1 + len(rows_data)}"
 
@@ -1247,11 +1306,14 @@ def ensure_ledger():
 
     dup_headers = [cell.value for cell in dup_sheet[1]] if dup_sheet.max_row else []
     if dup_headers != HEADERS:
-        dup_sheet.delete_rows(1, max(dup_sheet.max_row, 1))
-        dup_sheet.append(HEADERS)
-        apply_header_styles(dup_sheet)
-        dup_sheet.freeze_panes = "A2"
-        dup_sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}1"
+        if dup_headers and any(dup_headers):
+            migrate_legacy_sheet(dup_sheet, dup_headers)
+        else:
+            dup_sheet.delete_rows(1, max(dup_sheet.max_row, 1))
+            dup_sheet.append(HEADERS)
+            apply_header_styles(dup_sheet)
+            dup_sheet.freeze_panes = "A2"
+            dup_sheet.auto_filter.ref = f"A1:{get_column_letter(len(HEADERS))}1"
     else:
         compact_invoice_sheet(dup_sheet)
 
@@ -1475,8 +1537,9 @@ def sync_once() -> int:
             row = [""] * len(HEADERS)
             if lookup_record is not None:
                 for index, header in enumerate(HEADERS):
-                    if header not in ("NAME", "REF_NO", "REF_DT", "AMOUNT", "AMOUNT(SHEET1)", "Remark", "GST NO.", "PAN NUMBER", "TDS_NAME", "SERVICE_NAME"):
+                    if header not in ("SUPPLIER_SLID", "NAME", "REF_NO", "REF_DT", "AMOUNT", "AMOUNT(SHEET1)", "Remark", "GST NO.", "PAN NUMBER", "TDS_NAME", "SERVICE_NAME"):
                         row[index] = lookup_record.get(header.lower(), "")
+                row[IDX_SUPPLIER_SLID] = str(lookup_record.get("supplier_slid") or "").strip()
                 row[IDX_NAME] = extract_vendor_name_from_invoice(record)
                 row[IDX_AMOUNT_SHEET1] = lookup_record.get("amount", "")
                 final_tds = str(lookup_record.get("tds_name") or norm_ai_tds).strip()
@@ -1487,6 +1550,7 @@ def sync_once() -> int:
                 row[IDX_PAN_NO] = clean_pan or raw_pan or str(lookup_record.get("pan number") or "")
             else:
                 vendor_name = extract_vendor_name_fallback(record)
+                row[IDX_SUPPLIER_SLID] = ""
                 row[IDX_NAME] = vendor_name
                 row[IDX_AMOUNT_SHEET1] = ""
                 row[IDX_TDS_NAME] = norm_ai_tds or ai_tds
@@ -1496,8 +1560,8 @@ def sync_once() -> int:
 
             row[IDX_REF_NO] = inv_no
             row[IDX_REF_DT] = inv_date
-            ai_amt = record.get("AMOUNT(AI)")
-            row[IDX_AMOUNT] = ai_amt if (ai_amt not in (None, "")) else (lookup_record.get("amount", "") if lookup_record else "")
+            ai_amt = round_amount(record.get("AMOUNT(AI)"))
+            row[IDX_AMOUNT] = ai_amt if (ai_amt not in (None, "")) else (round_amount(lookup_record.get("amount", "")) if lookup_record else "")
 
             ai_remark = str(record.get("Remark") or record.get("Remarks") or record.get("remark") or "").strip()
             dup_msg = f"DUPLICATE ROW (Matches Invoices row {existing_row_idx})"
@@ -1532,10 +1596,11 @@ def sync_once() -> int:
             # User request: "if gst no and pan number not match with sheet1 tab...then add that data also and marked that in red row"
             vendor_name = extract_vendor_name_fallback(record)
             row = [""] * len(HEADERS)
+            row[IDX_SUPPLIER_SLID] = ""
             row[IDX_NAME] = vendor_name
             row[IDX_REF_NO] = inv_no
             row[IDX_REF_DT] = inv_date
-            ai_amt = record.get("AMOUNT(AI)")
+            ai_amt = round_amount(record.get("AMOUNT(AI)"))
             row[IDX_AMOUNT] = ai_amt if (ai_amt not in (None, "")) else ""
             row[IDX_AMOUNT_SHEET1] = ""
             final_tds_name = norm_ai_tds or ai_tds
@@ -1598,18 +1663,20 @@ def sync_once() -> int:
 
         row = [""] * len(HEADERS)
         for index, header in enumerate(HEADERS):
-            # Do NOT copy NAME, REF_NO, REF_DT, AMOUNT, AMOUNT(SHEET1), Remark, GST NO., PAN NUMBER, TDS_NAME, or SERVICE_NAME blindly from Sheet1
-            if header not in ("NAME", "REF_NO", "REF_DT", "AMOUNT", "AMOUNT(SHEET1)", "Remark", "GST NO.", "PAN NUMBER", "TDS_NAME", "SERVICE_NAME"):
+            # Do NOT copy SUPPLIER_SLID, NAME, REF_NO, REF_DT, AMOUNT, AMOUNT(SHEET1), Remark, GST NO., PAN NUMBER, TDS_NAME, or SERVICE_NAME blindly from Sheet1
+            if header not in ("SUPPLIER_SLID", "NAME", "REF_NO", "REF_DT", "AMOUNT", "AMOUNT(SHEET1)", "Remark", "GST NO.", "PAN NUMBER", "TDS_NAME", "SERVICE_NAME"):
                 row[index] = lookup_record.get(header.lower(), "")
 
+        # Set SUPPLIER_SLID from Sheet1 lookup aligned with GST NO.
+        row[IDX_SUPPLIER_SLID] = str(lookup_record.get("supplier_slid") or "").strip()
         # Set vendor name from invoice ONLY (never from Sheet1)
         row[IDX_NAME] = extract_vendor_name_from_invoice(record)
 
         # Set AI extracted values
         row[IDX_REF_NO] = inv_no
         row[IDX_REF_DT] = inv_date
-        ai_amt = record.get("AMOUNT(AI)")
-        row[IDX_AMOUNT] = ai_amt if (ai_amt not in (None, "")) else lookup_record.get("amount", "")
+        ai_amt = round_amount(record.get("AMOUNT(AI)"))
+        row[IDX_AMOUNT] = ai_amt if (ai_amt not in (None, "")) else round_amount(lookup_record.get("amount", ""))
 
         # Set Sheet1 amount based on matched record (GST/PAN + SERVICE_NAME + TDS_NAME)
         row[IDX_AMOUNT_SHEET1] = lookup_record.get("amount", "")

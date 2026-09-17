@@ -14,6 +14,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import fitz
@@ -251,7 +252,8 @@ INVOICE_PROMPT_BANNER = (
     "1. 'amount_ai': EXTRACT THE TOTAL TAXABLE VALUE (Taxable Amount / Base Amount before GST taxes).\n"
     "   - Look for the field labelled 'Total Taxable Value', 'Taxable Amount', 'Taxable Value', 'Basic Amount', or 'Subtotal'.\n"
     "   - Do NOT extract the Grand Total (inclusive of GST). The Amount column in the ledger must contain the Taxable Value.\n"
-    "   - For example, if Taxable Value = 1,834,250 and Grand Total = 2,164,414, pass amount_ai=1834250.0.\n"
+    "   - ROUND OFF TO NEAREST WHOLE INTEGER: Round off the amount (e.g. 221197.88 -> 221198.00, 23.4 -> 23.00).\n"
+    "   - For example, if Taxable Value = 1,834,250.30 and Grand Total = 2,164,414, pass amount_ai=1834250.0.\n"
     "2. 'invoice_date_ai': FORMAT INVOICE DATE AS M/D/YYYY (e.g. '9/1/2026', '9/2/2026', '8/1/2026') without leading zeros.\n"
     "3. 'tds_name':\n"
     "   - 'RENT-2026' for premises rent, lease, or licence fee\n"
@@ -754,6 +756,18 @@ def extract_vendor_from_remark(rem: str) -> str:
     return ""
 
 
+def round_amount(val: float | int | str | None) -> float | None:
+    """Round off amount to nearest integer (e.g. 221197.88 -> 221198.00, 23.4 -> 23.00)."""
+    if val is None or val == "":
+        return None
+    try:
+        num = float(str(val).replace(",", "").replace("₹", "").strip())
+        d = Decimal(str(num)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return float(d)
+    except Exception:
+        return val
+
+
 @mcp.tool()
 def save_extracted_data_to_json(
     filename: str,
@@ -780,6 +794,7 @@ def save_extracted_data_to_json(
         * Must be the TOTAL TAXABLE VALUE (Taxable Amount / Base Amount before GST taxes).
         * Look for 'Total Taxable Value', 'Taxable Amount', 'Taxable Value', 'Basic Amount', or 'Subtotal'.
         * Do NOT pass the Grand Total (inclusive of GST). The Amount column in the ledger holds the Taxable Value.
+        * ROUND OFF TO NEAREST WHOLE INTEGER: Round off amount (e.g. 221197.88 -> 221198.00, 23.4 -> 23.00).
     - tds_name (REQUIRED):
         * 'RENT-2026' for premises rent, lease, licence fees
         * 'Contract-2026' for CAM, maintenance, AMC, parking, electricity, or contractor services
@@ -811,6 +826,9 @@ def save_extracted_data_to_json(
     try:
         file_path = inbox_file(filename)
         payload = load_json_payload()
+
+        # Round off AI amount to nearest whole integer
+        amount_ai = round_amount(amount_ai)
 
         # If PDF and total_pages was not explicitly specified (or is 1), auto-detect actual page count
         if file_path.suffix.lower() == ".pdf" and total_pages <= 1:
